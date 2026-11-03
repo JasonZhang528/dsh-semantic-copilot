@@ -740,3 +740,38 @@ test('回归：增强中为彩色 loading（双环 + 品牌色转弧 + 旋转动
   mini.unmount(instance)
   await flush()
 })
+
+test('回归：悬浮态圆角与底色对齐宿主 standardControls 控件', async () => {
+  const mini = createMiniReact()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const instance = mini.mount(Component, {
+    useInput: (sel) => sel(state),
+    inputActions: { setDraft() {} },
+    keyboard: null,
+    sessionId: 's1',
+  })
+
+  // 静止态：圆角与相邻 select 统一（--dsw-radius-sm = 8px），底色透明、次级文字色。
+  const idle = findButton(instance.tree)
+  assert.equal(idle.props.style.borderRadius, 'var(--dsw-radius-sm)')
+  assert.equal(idle.props.style.background, 'transparent')
+  assert.equal(idle.props.style.color, 'var(--dsw-alias-label-secondary)')
+
+  // 悬浮态：叠加底色 + 提亮到主标签色（宿主 standardControls 兄弟控件口径）。
+  idle.props.onMouseEnter()
+  await flush()
+  const hovered = findButton(instance.tree)
+  assert.equal(hovered.props.style.background, 'var(--dsw-alias-interactive-bg-hover)')
+  assert.equal(hovered.props.style.color, 'var(--dsw-alias-label-primary)')
+
+  // 移出后完全恢复静止态。
+  hovered.props.onMouseLeave()
+  await flush()
+  const rested = findButton(instance.tree)
+  assert.equal(rested.props.style.background, 'transparent')
+  assert.equal(rested.props.style.color, 'var(--dsw-alias-label-secondary)')
+})

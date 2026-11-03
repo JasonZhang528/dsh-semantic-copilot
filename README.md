@@ -73,7 +73,7 @@ dsh plugin --profile <name> add github:<owner>/dsh-semantic-copilot
 ## 测试
 
 ```bash
-npm test          # node --test（64 个用例：prompt 纯函数 / Host 行为与 HTTP 路由 / 客户端状态机）
+npm test          # node --test（77 个用例：prompt 纯函数 / Host 行为与 HTTP 路由 / 客户端状态机）
 ```
 
 ## 许可

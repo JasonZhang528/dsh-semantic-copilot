@@ -342,14 +342,18 @@ window.__ModuleLoader__.load({
               height: 28,
               padding: 0,
               border: 'none',
-              borderRadius: 6,
-              background: hover && !disabled ? 'var(--dsw-alias-bg-layer-2)' : 'transparent',
+              // 圆角与相邻 select 控件统一（宿主 --dsw-radius-sm = 8px）。
+              borderRadius: 'var(--dsw-radius-sm)',
+              // 悬浮底色沿用宿主 standardControls 的叠加色：浅/深色主题下均可见。
+              background: hover && !disabled ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
               color:
                 phase === 'error'
                   ? 'var(--dsw-alias-state-error-primary)'
-                  : canRevert || (hover && !disabled)
+                  : canRevert
                     ? 'var(--dsw-alias-brand-primary)'
-                    : 'var(--dsw-alias-label-secondary)',
+                    : hover && !disabled
+                      ? 'var(--dsw-alias-label-primary)'
+                      : 'var(--dsw-alias-label-secondary)',
               cursor: disabled ? 'default' : 'pointer',
               // busy 时保持全亮：彩色 loading 即视觉焦点，不再叠加弱化。
               opacity: disabled && !busy ? 0.45 : 1,
