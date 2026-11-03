@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-semantic-copilot
+      name: 'dsh-semantic-copilot'
+      config: {}

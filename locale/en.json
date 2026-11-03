@@ -1,0 +1,8 @@
+{
+  "enhance": "Semantic enhance",
+  "enhancing": "Enhancing draft…",
+  "revert": "Restore original",
+  "failed": "Enhance failed",
+  "empty": "Type something first",
+  "hint": "Semantic enhance: rewrite the current draft into a clearer, more specific prompt"
+}
