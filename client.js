@@ -247,7 +247,10 @@ window.__ModuleLoader__.load({
           fetch(API, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text }),
+            // 透传当前会话标识：Host 会把它带进 llm.stream，供 opencode-go 注入会话头。
+            body: JSON.stringify(
+              requestedSessionId === undefined ? { text } : { text, sessionId: requestedSessionId },
+            ),
             signal: controller.signal,
           })
             .then(async (response) => {
@@ -291,7 +294,16 @@ window.__ModuleLoader__.load({
             })
         }, [busy, canRevert, draft, original, writeDraft])
 
-        // 图标态：busy 旋弧 / 可恢复 ↩ / 失败 ⚠ / 默认 ✦。无文字标签，语义走 aria-label + title。
+        // 空草稿且无任何进行中/可恢复/错误状态时，整个按钮不渲染（返回 null），
+        // 而不是此前的「灰显占位」。三条例外必须保留，避免把用户困住：
+        //   busy        —— 增强中旋弧仍在转，隐藏会让用户看不到进度；
+        //   canRevert   —— 已产出增强结果、可回退 ↩，需保留恢复原文的入口；
+        //   phase=error —— 失败提示 ⚠ 需可见，否则错误无可视反馈。
+        // 该 return 位于全部 hook（useState/useEffect/useRef/useCallback）之后，
+        // 保证每次渲染调用顺序一致，不违反 Hooks 规则。
+        if (!busy && !canRevert && phase !== 'error' && draft.trim() === '') return null
+
+        // 图标态：busy 旋弧 / 可恢复 ↩ / 失败 ⚠ / 默认 ✦。无文字标签，语义走 aria-label + title.
         const label = busy
           ? tr('enhancing')
           : canRevert

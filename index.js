@@ -26,6 +26,43 @@ function nonEmpty(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }
 
+/**
+ * opencode-go 路由的会话标识兜底。
+ *
+ * llm-pi-ai 适配器只有在 options.sessionId 存在时才会向 provider 包装器透传
+ * sessionId，opencode-headers 的 withSessionHeader 据此注入 x-opencode-session
+ * 请求头；缺失即被网关以 400 {"type":"MissingSessionID"} 拒绝。
+ *
+ * 两条入口都取不到真实会话标识时，回退到本模块级稳定标识：只惰性生成一次并
+ * 持续复用（绝不每次请求新生成，否则每次都被当作新会话）。生成过程自身绝不抛异常。
+ */
+let fallbackSessionId
+function stableFallbackSessionId() {
+  if (fallbackSessionId === undefined) {
+    try {
+      const generated =
+        typeof globalThis.crypto?.randomUUID === 'function'
+          ? globalThis.crypto.randomUUID()
+          : `dsh-semantic-copilot-${Date.now()}-${Math.random().toString(16).slice(2)}`
+      fallbackSessionId = String(generated)
+    } catch {
+      fallbackSessionId = `dsh-semantic-copilot-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    }
+  }
+  return fallbackSessionId
+}
+
+/**
+ * 解析本次请求要透传给 llm.stream 的 sessionId。
+ *
+ * 显式标识（工具路径的 exec.agent.id / 路由体里的 sessionId）优先；缺失或空白时
+ * 回退到模块级稳定标识，保证 opencode-go 不再因缺头失败。
+ */
+function resolveSessionId(explicit) {
+  const value = nonEmpty(typeof explicit === 'string' ? explicit : undefined)
+  return value ?? stableFallbackSessionId()
+}
+
 function readOptions(config) {
   const source = config && typeof config === 'object' ? config : {}
   const timeoutMs = Number.isFinite(source.timeoutMs) && source.timeoutMs > 0 ? source.timeoutMs : DEFAULT_TIMEOUT_MS
@@ -222,12 +259,14 @@ function createRouteHandler(ctx, options, enhance) {
       }
       const text = payload && typeof payload.text === 'string' ? payload.text : ''
       const model = payload && typeof payload.model === 'string' ? payload.model : undefined
+      // 客户端在请求体里带上自己的会话标识；缺失时 enhance 内部回退稳定标识。
+      const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId : undefined
       // 客户端断开时取消 LLM 调用（60s 上限仍兜底）。
       const disconnect = new AbortController()
       res.on('close', () => {
         if (!res.writableEnded) disconnect.abort()
       })
-      const envelope = await enhance(text, model, disconnect.signal)
+      const envelope = await enhance(text, model, disconnect.signal, sessionId)
       sendJson(res, 200, envelope)
     })().catch((error) => {
       // 不把内部错误细节回给客户端；具体原因交给宿主日志。
@@ -252,7 +291,7 @@ export function apply(ctx, config) {
    * 单次补全：把草稿改写为更强的提示词。
    * 所有失败都以 `{success:false, code, error}` 信封返回，不抛给调用方。
    */
-  async function enhance(rawText, modelArg, signal) {
+  async function enhance(rawText, modelArg, signal, sessionIdArg) {
     const input = typeof rawText === 'string' ? rawText : ''
     // 空输入不发起模型调用。
     if (input.trim() === '') return failure('empty_input', 'Empty input')
@@ -287,6 +326,8 @@ export function apply(ctx, config) {
           { role: 'user', content: [{ type: 'text', text: buildUserPrompt(input) }] },
         ],
         signal: controller.signal,
+        // opencode-go 路由依赖该字段注入 x-opencode-session；缺失即 400 MissingSessionID。
+        sessionId: resolveSessionId(sessionIdArg),
       })
       const { text, failureMessage } = await collectText(stream)
       // 流可能不感知中止（或在收尾帧前被切断），这里做二次校验，
@@ -367,7 +408,9 @@ export function apply(ctx, config) {
     timeoutMs: TOOL_TIMEOUT_MS,
     async execute(args, exec) {
       const input = args && typeof args === 'object' ? args : {}
-      return enhance(input.text, input.model, exec?.signal)
+      // Agent 接口只暴露只读 id（SessionId）；取不到时 enhance 内部回退稳定标识。
+      const sessionId = exec?.agent?.id
+      return enhance(input.text, input.model, exec?.signal, sessionId)
     },
   })
   } catch (error) {

@@ -172,7 +172,7 @@ test('bundle 契约：id / inject / slot 注册', () => {
   assert.equal(captured.registered[0].meta.name, 'conversation.input.right')
 })
 
-test('空草稿：按钮禁用，title 提示先输入内容', () => {
+test('空草稿（idle）：不渲染按钮，组件返回 null', () => {
   const mini = createMiniReact()
   const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
   const { ctx, captured } = makeSlotsCtx(undefined)
@@ -180,10 +180,102 @@ test('空草稿：按钮禁用，title 提示先输入内容', () => {
   const Component = captured.registered[0].Component
   const state = { draft: '' }
   const instance = mini.mount(Component, { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' })
+  // 空草稿且 !busy && !canRevert && phase!=='error'：返回 null，DOM 中不出现该按钮。
+  assert.equal(instance.tree, null)
+  assert.equal(findButton(instance.tree), null)
+})
+
+test('空草稿（纯空白）：同样返回 null，不渲染按钮', () => {
+  const mini = createMiniReact()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: '   \n\t ' }
+  const instance = mini.mount(Component, { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' })
+  assert.equal(instance.tree, null)
+})
+
+test('例外：busy（增强中）时草稿为空仍渲染按钮，可见增强中旋弧', async () => {
+  const mini = createMiniReact()
+  // fetch 保持到 abort：请求停留在 running 态；卸载 abort 时 reject，finally 会清掉
+  // watchdog 定时器，避免 90s 定时器把测试进程挂住。
+  const fetchImpl = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')))
+    })
+  const { module } = loadClient(mini.React, fetchImpl, undefined, { timerScale: 9000 })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const props = { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+  findButton(instance.tree).props.onClick()
+  await flush()
+  // 增强中把草稿清空：busy 例外生效，按钮仍渲染且处于 running（旋弧可见）。
+  state.draft = ''
+  mini.rerender(instance, props)
   const button = findButton(instance.tree)
-  assert.equal(button.props.disabled, true)
-  assert.equal(button.props.title, '先输入内容再增强')
-  assert.equal(button.props['data-semantic-copilot'], 'idle')
+  assert.ok(button, 'busy 时应仍渲染按钮')
+  assert.equal(button.props['data-semantic-copilot'], 'running')
+  assert.equal(button.props['aria-busy'], 'true')
+  assert.equal(typeof button.props.children.type, 'function') // IconBusy 旋弧
+  mini.unmount(instance)
+  await flush()
+})
+
+test('例外：canRevert（可恢复）时按钮仍渲染，仍可点击恢复原文', async () => {
+  const mini = createMiniReact()
+  let resolveFetch
+  const fetchImpl = () => new Promise((resolve) => { resolveFetch = () => resolve({ ok: true, json: async () => ({ success: true, text: 'B' }) }) })
+  const { module } = loadClient(mini.React, fetchImpl)
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const setDraftCalls = []
+  const state = { draft: 'A' }
+  const inputActions = { setDraft(text) { setDraftCalls.push(text); state.draft = text } }
+  const props = { useInput: (sel) => sel(state), inputActions, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+  findButton(instance.tree).props.onClick()
+  await flush()
+  resolveFetch()
+  await flush()
+  await flush()
+  // canRevert 为 true 的状态（phase==='done' 且草稿仍是增强结果）必须渲染按钮，
+  // 且点击可恢复原文，不会被「空草稿隐藏」分支吞掉。
+  const button = findButton(instance.tree)
+  assert.ok(button, 'canRevert 时应仍渲染按钮')
+  assert.equal(button.props['data-semantic-copilot'], 'done')
+  assert.equal(button.props['aria-label'], '恢复原文')
+  button.props.onClick()
+  await flush()
+  assert.deepEqual(setDraftCalls, ['B', 'A'])
+  assert.equal(findButton(instance.tree).props['data-semantic-copilot'], 'idle')
+})
+
+test('例外：phase==="error" 时草稿被清空仍渲染按钮，保留失败提示', async () => {
+  const mini = createMiniReact()
+  const fetchImpl = async () => ({ ok: false, status: 500, json: async () => ({ success: false, error: 'boom' }) })
+  const { module } = loadClient(mini.React, fetchImpl)
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const props = { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+  findButton(instance.tree).props.onClick()
+  await flush()
+  await flush()
+  // 失败后清空草稿：error 例外生效，按钮仍渲染并保留 ⚠ 与失败 title。
+  state.draft = ''
+  mini.rerender(instance, props)
+  const button = findButton(instance.tree)
+  assert.ok(button, 'error 时应仍渲染按钮')
+  assert.equal(button.props['data-semantic-copilot'], 'error')
+  assert.equal(button.props['aria-label'], '增强失败')
+  assert.equal(button.props.title, '增强失败：boom')
 })
 
 test('点击增强：请求成功后替换草稿并进入可恢复状态', async () => {
@@ -196,7 +288,7 @@ test('点击增强：请求成功后替换草稿并进入可恢复状态', async
         resolve({ ok: true, json: async () => ({ success: true, text: '更清晰的提示词' }) })
       assert.equal(init.method, 'POST')
       assert.equal(init.url ?? _url, '/prompt-enhance')
-      assert.deepEqual(JSON.parse(init.body), { text: '原始草稿' })
+      assert.deepEqual(JSON.parse(init.body), { text: '原始草稿', sessionId: 's1' })
       calls.push('requested')
     })
 

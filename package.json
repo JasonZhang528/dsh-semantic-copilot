@@ -1,6 +1,6 @@
 {
   "name": "dsh-semantic-copilot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 输入框语义增强：把当前草稿交给当前模型改写为更清晰、更具体的提示词，一键替换原文，再次点击可还原。",
   "type": "module",
   "main": "./index.js",

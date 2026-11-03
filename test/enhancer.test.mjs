@@ -597,3 +597,100 @@ test('回归：客户端断连取消 LLM 调用', async () => {
     server.close()
   }
 })
+
+// ---------------------------------------------------------------------------
+// issue #1 回归：opencode go 模式增强失败（400 MissingSessionID）
+// 语义增强插件的 llm.stream 请求必须带上 sessionId，Host/provider 才能注入
+// x-opencode-session 头，否则请求会被网关以 MissingSessionID 拒绝。
+// ---------------------------------------------------------------------------
+
+test('issue#1：工具路径把 exec.agent.id 作为 sessionId 传给 llm.stream', async () => {
+  const seen = []
+  const { ctx, registered } = makeCtx({
+    selection: { provider: 'p', model: 'm' },
+    llm: { stream: (req) => { seen.push(req); return textStream('ok') } },
+  })
+  apply(ctx, {})
+  const out = await captureTool(registered).execute({ text: 'x' }, { agent: { id: 'session-abc' } })
+  assert.equal(out.success, true)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].sessionId, 'session-abc')
+})
+
+test('issue#1：工具路径缺少会话标识时回退到稳定标识，且多次复用同一个值', async () => {
+  const seen = []
+  const { ctx, registered } = makeCtx({
+    selection: { provider: 'p', model: 'm' },
+    llm: { stream: (req) => { seen.push(req); return textStream('ok') } },
+  })
+  apply(ctx, {})
+  const tool = captureTool(registered)
+  await tool.execute({ text: 'a' }, {})
+  await tool.execute({ text: 'b' }, { agent: {} })
+  assert.equal(seen.length, 2)
+  assert.equal(typeof seen[0].sessionId, 'string')
+  assert.ok(seen[0].sessionId.length > 0)
+  // 稳定标识：跨请求必须是同一个，否则每次都会被当成新会话。
+  assert.equal(seen[1].sessionId, seen[0].sessionId)
+})
+
+test('issue#1：工具路径空白会话标识视同缺失，回退稳定标识', async () => {
+  const seen = []
+  const { ctx, registered } = makeCtx({
+    selection: { provider: 'p', model: 'm' },
+    llm: { stream: (req) => { seen.push(req); return textStream('ok') } },
+  })
+  apply(ctx, {})
+  await captureTool(registered).execute({ text: 'x' }, { agent: { id: '   ' } })
+  assert.equal(typeof seen[0].sessionId, 'string')
+  assert.ok(seen[0].sessionId.trim().length > 0)
+})
+
+test('issue#1：HTTP 路由把请求体的 sessionId 透传给 llm.stream', async () => {
+  const seen = []
+  const { server, url } = await startServer({
+    selection: { provider: 'p', model: 'm' },
+    llm: { stream: (req) => { seen.push(req); return textStream('增强结果') } },
+  })
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '原始', sessionId: 'session-http-1' }),
+    })
+    assert.equal(response.status, 200)
+    const data = await response.json()
+    assert.equal(data.success, true)
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].sessionId, 'session-http-1')
+  } finally {
+    server.close()
+  }
+})
+
+test('issue#1：HTTP 路由缺少 sessionId 时回退稳定标识且仍成功', async () => {
+  const seen = []
+  const { server, url } = await startServer({
+    selection: { provider: 'p', model: 'm' },
+    llm: { stream: (req) => { seen.push(req); return textStream('ok') } },
+  })
+  try {
+    const response = await fetch(url, { method: 'POST', body: JSON.stringify({ text: 'x' }) })
+    assert.equal(response.status, 200)
+    const data = await response.json()
+    assert.equal(data.success, true)
+    assert.equal(typeof seen[0].sessionId, 'string')
+    assert.ok(seen[0].sessionId.length > 0)
+    // 与工具路径共享同一个模块级稳定标识。
+    const { ctx, registered } = makeCtx({
+      selection: { provider: 'p', model: 'm' },
+      llm: { stream: (req) => { seen.push(req); return textStream('ok') } },
+    })
+    apply(ctx, {})
+    await captureTool(registered).execute({ text: 'y' }, {})
+    assert.equal(seen[1].sessionId, seen[0].sessionId)
+  } finally {
+    server.close()
+  }
+})
+
