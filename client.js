@@ -8,7 +8,7 @@
  * 交互：
  *   空闲   → 点击：把当前草稿发给 Host 增强；成功后整段替换草稿并记住原文；
  *   已增强 → 草稿未被手动改动时按钮变为「恢复原文」，点击还原；
- *   失败   → 按钮变为「增强失败」，title 显示原因，再次点击重试。
+ *   失败   → 按钮变为「增强失败」，气泡显示原因，再次点击重试。
  *
  * 与 Host 的唯一通道是同源 `POST /prompt-enhance`（见 index.js）。
  */
@@ -29,8 +29,8 @@ window.__ModuleLoader__.load({
       revert: '恢复原文',
       failed: '增强失败',
       empty: '先输入内容再增强',
-      hint: '语义增强：把当前草稿改写成更清晰具体的提示词',
-      tooltipRevert: '恢复原文',
+      tipEnhance: '语义增强',
+      tipRevert: '撤销语义增强',
     }
     const EN = {
       enhance: 'Semantic enhance',
@@ -38,8 +38,8 @@ window.__ModuleLoader__.load({
       revert: 'Restore original',
       failed: 'Enhance failed',
       empty: 'Type something first',
-      hint: 'Semantic enhance: rewrite the current draft into a clearer, more specific prompt',
-      tooltipRevert: 'Restore original',
+      tipEnhance: 'Semantic enhance',
+      tipRevert: 'Undo semantic enhancement',
     }
 
     /** 没有注入 useInput 时的兜底选择器：始终返回空草稿。 */
@@ -165,6 +165,8 @@ window.__ModuleLoader__.load({
         const [enhanced, setEnhanced] = useState('')
         const [error, setError] = useState('')
         const [hover, setHover] = useState(false)
+        // 键盘聚焦时同样显示气泡，保证纯键盘用户也能看到当前动作说明。
+        const [focusTip, setFocusTip] = useState(false)
         const controllerRef = useRef(null)
         // 请求发起时的会话 id：响应回来前若用户已切走，则丢弃响应，
         // 绝不把 A 会话的增强结果写进 B 会话的输入框。
@@ -303,7 +305,7 @@ window.__ModuleLoader__.load({
         // 保证每次渲染调用顺序一致，不违反 Hooks 规则。
         if (!busy && !canRevert && phase !== 'error' && draft.trim() === '') return null
 
-        // 图标态：busy 旋弧 / 可恢复 ↩ / 失败 ⚠ / 默认 ✦。无文字标签，语义走 aria-label + title.
+        // 图标态：busy 旋弧 / 可恢复 ↩ / 失败 ⚠ / 默认 ✦。无文字标签，语义走 aria-label + 气泡。
         const label = busy
           ? tr('enhancing')
           : canRevert
@@ -311,59 +313,81 @@ window.__ModuleLoader__.load({
             : phase === 'error'
               ? tr('failed')
               : tr('enhance')
-        // tooltip（原生 title，宿主惯例）：失败给原因，空草稿给引导，其余给当前动作说明。
-        const title =
+        // 气泡文案（宿主原生 Tooltip 外观）：失败给原因，空草稿给引导，
+        // 已增强给「撤销语义增强」，其余给「语义增强」，随状态即时切换。
+        const tipText =
           phase === 'error' && error !== ''
             ? tr('failed') + '：' + error
             : disabled && !busy
               ? tr('empty')
-              : phase === 'idle'
-                ? tr('hint')
-                : label
+              : canRevert
+                ? tr('tipRevert')
+                : tr('tipEnhance')
+        // 悬浮或键盘聚焦且非禁用时展示；disabled 时隐藏，避免遮住相邻控件。
+        const tipVisible = (hover || focusTip) && !disabled
 
         return h(
-          'button',
+          // 外层定位容器：气泡以它为锚点绝对定位，避免向 body 追加任何 DOM。
+          'span',
           {
-            type: 'button',
-            'data-semantic-copilot': phase,
-            'aria-label': label,
-            'aria-busy': busy ? 'true' : undefined,
-            title,
-            disabled,
             style: {
+              position: 'relative',
               display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              // 与旁边控件中心轴对齐：inline 默认 baseline 会下沉，flex 父级则靠 alignSelf。
               verticalAlign: 'middle',
               alignSelf: 'center',
-              boxSizing: 'border-box',
-              width: 28,
-              height: 28,
-              padding: 0,
-              border: 'none',
-              // 圆角与相邻 select 控件统一（宿主 --dsw-radius-sm = 8px）。
-              borderRadius: 'var(--dsw-radius-sm)',
-              // 悬浮底色沿用宿主 standardControls 的叠加色：浅/深色主题下均可见。
-              background: hover && !disabled ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
-              color:
-                phase === 'error'
-                  ? 'var(--dsw-alias-state-error-primary)'
-                  : canRevert
-                    ? 'var(--dsw-alias-brand-primary)'
-                    : hover && !disabled
-                      ? 'var(--dsw-alias-label-primary)'
-                      : 'var(--dsw-alias-label-secondary)',
-              cursor: disabled ? 'default' : 'pointer',
-              // busy 时保持全亮：彩色 loading 即视觉焦点，不再叠加弱化。
-              opacity: disabled && !busy ? 0.45 : 1,
-              transition: 'background .12s ease, color .12s ease',
             },
-            onClick,
-            onMouseEnter: () => setHover(true),
-            onMouseLeave: () => setHover(false),
           },
-          busy ? h(IconBusy) : canRevert ? h(IconRevert) : phase === 'error' ? h(IconWarn) : h(IconSparkle),
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-semantic-copilot': phase,
+              'aria-label': label,
+              'aria-busy': busy ? 'true' : undefined,
+              // 计算后的气泡文案以 data-* 暴露，便于状态无关断言与调试；非原生 title，不触发浏览器提示。
+              'data-tip': tipText,
+              disabled,
+              style: {
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                // 与旁边控件中心轴对齐：inline 默认 baseline 会下沉，flex 父级则靠 alignSelf。
+                verticalAlign: 'middle',
+                alignSelf: 'center',
+                boxSizing: 'border-box',
+                width: 28,
+                height: 28,
+                padding: 0,
+                border: 'none',
+                // 圆角与相邻 select 控件统一（宿主 --dsw-radius-sm = 8px）。
+                borderRadius: 'var(--dsw-radius-sm)',
+                // 悬浮底色沿用宿主 standardControls 的叠加色：浅/深色主题下均可见。
+                background: hover && !disabled ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+                color:
+                  phase === 'error'
+                    ? 'var(--dsw-alias-state-error-primary)'
+                    : canRevert
+                      ? 'var(--dsw-alias-brand-primary)'
+                      : hover && !disabled
+                        ? 'var(--dsw-alias-label-primary)'
+                        : 'var(--dsw-alias-label-secondary)',
+                cursor: disabled ? 'default' : 'pointer',
+                // busy 时保持全亮：彩色 loading 即视觉焦点，不再叠加弱化。
+                opacity: disabled && !busy ? 0.45 : 1,
+                transition: 'background .12s ease, color .12s ease',
+              },
+              onClick,
+              onMouseEnter: () => setHover(true),
+              onMouseLeave: () => setHover(false),
+              onFocus: () => setFocusTip(true),
+              onBlur: () => setFocusTip(false),
+            },
+            busy ? h(IconBusy) : canRevert ? h(IconRevert) : phase === 'error' ? h(IconWarn) : h(IconSparkle),
+          ),
+          // 气泡：类名 + 内联定位；外观（底色/文字/圆角/内边距/动画）全部来自注入的共享样式。
+          tipVisible
+            ? h('span', { className: 'dsh-semantic-copilot-tip', role: 'tooltip' }, tipText)
+            : null,
         )
       }
     }
@@ -383,8 +407,36 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 注入气泡样式（宿主原生 Tooltip 外观）：一次性、幂等、重载安全。
+     * 只引用宿主 --dsw-* 设计令牌，不引用任何宿主哈希类名或包，避免与宿主样式耦合。
+     */
+    function ensureTipStyle() {
+      try {
+        if (typeof document === 'undefined') return
+        if (document.getElementById('dsh-semantic-copilot-tip-style')) return
+        const style = document.createElement('style')
+        style.id = 'dsh-semantic-copilot-tip-style'
+        style.textContent =
+          '.dsh-semantic-copilot-tip{' +
+          'position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);' +
+          'z-index:1100;display:inline-flex;align-items:center;gap:8px;width:max-content;' +
+          'box-sizing:border-box;max-width:min(50vw,calc(100vw - 24px));' +
+          'padding:3px 7px;border-radius:var(--dsw-radius-sm);' +
+          'background:var(--dsw-alias-tooltip-bg);color:var(--dsw-static-neutral-bluish-00);' +
+          'font-size:13px;line-height:20px;white-space:pre-line;overflow-wrap:break-word;' +
+          'pointer-events:none;animation:dsh-semantic-copilot-tip-in .15s var(--ds-ease-in-out);}' +
+          '@keyframes dsh-semantic-copilot-tip-in{0%{opacity:0}}' +
+          '@media (prefers-reduced-motion: reduce){.dsh-semantic-copilot-tip{animation:none}}'
+        document.head.appendChild(style)
+      } catch (error) {
+        console.warn('[semantic-copilot] tip style injection unavailable:', error)
+      }
+    }
+
     function apply(ctx) {
       ensureSpinStyle()
+      ensureTipStyle()
       const t = translator(ctx)
       const EnhanceButton = makeEnhanceButton(t)
       try {

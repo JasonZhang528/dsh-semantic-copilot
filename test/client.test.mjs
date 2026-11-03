@@ -107,7 +107,7 @@ function createMiniReact() {
 // ---------------------------------------------------------------------------
 // bundle 加载器
 // ---------------------------------------------------------------------------
-function loadClient(React, fetchImpl, consoleImpl, { timerScale = 1 } = {}) {
+function loadClient(React, fetchImpl, consoleImpl, { timerScale = 1, documentImpl } = {}) {
   const here = dirname(fileURLToPath(import.meta.url))
   const source = readFileSync(join(here, '..', 'client.js'), 'utf8')
   let captured = null
@@ -121,6 +121,9 @@ function loadClient(React, fetchImpl, consoleImpl, { timerScale = 1 } = {}) {
     DOMException,
     console: consoleImpl ?? { warn() {}, error() {}, log() {} },
   }
+  // 仅在测试显式提供时注入 document：多数用例保持无 DOM 环境，验证样式注入的
+  // typeof document 守卫；需要断言 ensureTipStyle 的用例再传入最小 stub。
+  if (documentImpl !== undefined) context.document = documentImpl
   vm.createContext(context)
   vm.runInContext(source, context, { filename: 'client.js' })
   assert.ok(captured, 'bundle 应通过 __ModuleLoader__.load 注册')
@@ -149,10 +152,33 @@ function makeSlotsCtx(localeImpl) {
 }
 
 
+// 递归 + 数组感知：气泡出现后外层 span 含 2 个子节点（数组），单链下钻会断。
 function findButton(tree) {
-  let node = tree
-  while (node && node.type !== 'button') node = node.children
-  return node
+  if (!tree) return null
+  if (Array.isArray(tree)) {
+    for (const child of tree) {
+      const found = findButton(child)
+      if (found) return found
+    }
+    return null
+  }
+  if (tree.type === 'button') return tree
+  return findButton(tree.props && tree.props.children)
+}
+
+// 按类名查找气泡节点（含 dsh-semantic-copilot-tip）。
+function findTip(tree) {
+  if (!tree) return null
+  if (Array.isArray(tree)) {
+    for (const child of tree) {
+      const found = findTip(child)
+      if (found) return found
+    }
+    return null
+  }
+  const cls = tree.props && tree.props.className
+  if (typeof cls === 'string' && cls.includes('dsh-semantic-copilot-tip')) return tree
+  return findTip(tree.props && tree.props.children)
 }
 
 const flush = async () => {
@@ -275,7 +301,7 @@ test('例外：phase==="error" 时草稿被清空仍渲染按钮，保留失败�
   assert.ok(button, 'error 时应仍渲染按钮')
   assert.equal(button.props['data-semantic-copilot'], 'error')
   assert.equal(button.props['aria-label'], '增强失败')
-  assert.equal(button.props.title, '增强失败：boom')
+  assert.equal(button.props['data-tip'], '增强失败：boom')
 })
 
 test('点击增强：请求成功后替换草稿并进入可恢复状态', async () => {
@@ -303,7 +329,7 @@ test('点击增强：请求成功后替换草稿并进入可恢复状态', async
 
   let button = findButton(instance.tree)
   assert.equal(button.props.disabled, false)
-  assert.equal(button.props.title, '语义增强：把当前草稿改写成更清晰具体的提示词')
+  assert.equal(button.props['data-tip'], '语义增强')
 
   button.props.onClick()
   await flush()
@@ -362,7 +388,7 @@ test('请求失败：进入 error 态，title 携带原因', async () => {
   const button = findButton(instance.tree)
   assert.equal(button.props['data-semantic-copilot'], 'error')
   assert.equal(button.props['aria-label'], '增强失败')
-  assert.equal(button.props.title, '增强失败：LLM service is not available')
+  assert.equal(button.props['data-tip'], '增强失败：LLM service is not available')
   assert.equal(button.props.disabled, false)
 })
 
@@ -533,7 +559,7 @@ test('回归：还原路径 setDraft 抛错进入 error 态而不冒泡', async 
   await flush()
   const button = findButton(instance.tree)
   assert.equal(button.props['data-semantic-copilot'], 'error')
-  assert.equal(button.props.title, '增强失败：composer exploded on restore')
+  assert.equal(button.props['data-tip'], '增强失败：composer exploded on restore')
   // 草稿未被破坏。
   assert.equal(state.draft, 'B')
 })
@@ -557,7 +583,7 @@ test('回归：watchdog 超时（abort 且仍是当前请求）进入 error 态'
   await flush()
   const button = findButton(instance.tree)
   assert.equal(button.props['data-semantic-copilot'], 'error')
-  assert.equal(button.props.title, '增强失败：Request timed out')
+  assert.equal(button.props['data-tip'], '增强失败：Request timed out')
 })
 
 test('回归：卸载触发的 abort 不产生异常', async () => {
@@ -683,8 +709,8 @@ test('回归：状态与图标映射（idle/busy/done/error）', async () => {
   await flush()
   const revertIcon = iconOf(findButton(instance.tree))
   assert.notEqual(revertIcon, busyIcon)
-  // done 后 title 是恢复动作说明
-  assert.equal(findButton(instance.tree).props.title, '恢复原文')
+  // done 后气泡文案切换为撤销动作说明
+  assert.equal(findButton(instance.tree).props['data-tip'], '撤销语义增强')
 })
 
 test('回归：纯图标按钮无文字残留', async () => {
@@ -699,7 +725,9 @@ test('回归：纯图标按钮无文字残留', async () => {
   // 唯一子元素是图标组件（内部渲染 svg），无文本 span。
   assert.equal(typeof btn.props.children.type, 'function')
   assert.equal(btn.props['aria-label'], '语义增强')
-  assert.equal(typeof btn.props.title, 'string')
+  // 原生 title 已移除（改用自绘气泡），改为 data-tip 承载文案，不再触发浏览器原生提示。
+  assert.equal(btn.props.title, undefined)
+  assert.equal(typeof btn.props['data-tip'], 'string')
   // 中心轴对齐：inline baseline 会下沉，必须显式 middle/center。
   assert.equal(btn.props.style.verticalAlign, 'middle')
   assert.equal(btn.props.style.alignSelf, 'center')
@@ -775,3 +803,144 @@ test('回归：悬浮态圆角与底色对齐宿主 standardControls 控件', as
   assert.equal(rested.props.style.background, 'transparent')
   assert.equal(rested.props.style.color, 'var(--dsw-alias-label-secondary)')
 })
+
+
+// ---------------------------------------------------------------------------
+// t12：语义增强按钮 tooltip（宿主原生气泡样式，随 canRevert 切换文案）
+// ---------------------------------------------------------------------------
+
+// 最小 document stub：只覆盖 ensureTipStyle/ensureSpinStyle 用到的接口，
+// 记录注入到 head 的 <style> 节点，供样式契约断言。
+function makeDocumentStub() {
+  const headChildren = []
+  const byId = new Map()
+  const documentImpl = {
+    documentElement: { lang: 'zh-CN' },
+    head: {
+      appendChild(node) {
+        headChildren.push(node)
+        if (node.id) byId.set(node.id, node)
+        return node
+      },
+    },
+    getElementById(id) {
+      return byId.get(id) ?? null
+    },
+    createElement(tag) {
+      return { tag, id: '', textContent: '' }
+    },
+  }
+  return { documentImpl, headChildren, byId }
+}
+
+test('t12：tooltip 文案随 canRevert 在两态间切换（语义增强 / 撤销语义增强）', async () => {
+  const mini = createMiniReact()
+  const fetchImpl = () => Promise.resolve({ ok: true, json: async () => ({ success: true, text: 'B' }) })
+  const { module } = loadClient(mini.React, fetchImpl)
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  // setDraft 必须真正写回草稿：canRevert 依赖 draft===enhanced，否则撤销态永远不成立。
+  const inputActions = { setDraft(text) { state.draft = text } }
+  const props = { useInput: (sel) => sel(state), inputActions, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+
+  // 默认态：气泡文案为「语义增强」。
+  assert.equal(findButton(instance.tree).props['data-tip'], '语义增强')
+
+  // 触发增强 → 进入 done（canRevert=true）：同一 tooltip 切换为「撤销语义增强」。
+  findButton(instance.tree).props.onClick()
+  await flush()
+  const btn = findButton(instance.tree)
+  assert.equal(btn.props['data-semantic-copilot'], 'done')
+  assert.equal(btn.props['data-tip'], '撤销语义增强')
+
+  // 撤销后回到 idle：文案再次切回「语义增强」。
+  btn.props.onClick()
+  await flush()
+  const back = findButton(instance.tree)
+  assert.equal(back.props['data-semantic-copilot'], 'idle')
+  assert.equal(back.props['data-tip'], '语义增强')
+})
+
+test('t12：ensureTipStyle 注入宿主原生 Tooltip 外观且无宿主哈希类/包引用', () => {
+  const mini = createMiniReact()
+  const { documentImpl, headChildren, byId } = makeDocumentStub()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') }, undefined, { documentImpl })
+  const { ctx } = makeSlotsCtx(undefined)
+
+  // apply 时应注入气泡样式（幂等：重复 apply 不重复追加）。
+  module.apply(ctx)
+  module.apply(ctx)
+
+  const style = byId.get('dsh-semantic-copilot-tip-style')
+  assert.ok(style, '应注入 id 为 dsh-semantic-copilot-tip-style 的样式节点')
+  assert.equal(headChildren.filter((n) => n.id === 'dsh-semantic-copilot-tip-style').length, 1)
+
+  const css = style.textContent
+  // 类名与宿主原生 Tooltip 令牌：底色 / 文字色 / 圆角 / 内边距。
+  assert.match(css, /\.dsh-semantic-copilot-tip\{/)
+  assert.match(css, /background:var\(--dsw-alias-tooltip-bg\)/)
+  assert.match(css, /color:var\(--dsw-static-neutral-bluish-00\)/)
+  assert.match(css, /border-radius:var\(--dsw-radius-sm\)/)
+  assert.match(css, /padding:3px 7px/)
+  // 降低动效偏好的降级。
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\{\.dsh-semantic-copilot-tip\{animation:none\}\}/)
+  // 不与宿主实现耦合：不得出现宿主哈希类名或直接引用宿主包。
+  assert.doesNotMatch(css, /GRgSLq_/)
+  assert.doesNotMatch(css, /@deepseek-ai\//)
+})
+
+test('t12：button 不再使用原生 title，aria-label 保留（无浏览器默认提示）', async () => {
+  const mini = createMiniReact()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const props = { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+
+  const btn = findButton(instance.tree)
+  assert.equal(btn.props.title, undefined, 'button 不应再设置原生 title')
+  assert.equal(btn.props['aria-label'], '语义增强', 'aria-label 仍需保留可读文案')
+  assert.equal(typeof btn.props['data-tip'], 'string', '计算后的气泡文案以 data-tip 暴露')
+})
+
+test('t12：气泡仅在 hover / focus 且非 disabled 时渲染，失焦/移出即隐藏', async () => {
+  const mini = createMiniReact()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const props = { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+
+  // 初始（未交互）：无气泡。
+  assert.equal(findTip(instance.tree), null)
+
+  // 鼠标悬停：出现带 role=tooltip 与气泡类名的节点，文案为默认 tooltip。
+  findButton(instance.tree).props.onMouseEnter()
+  await flush()
+  const hoverTip = findTip(instance.tree)
+  assert.ok(hoverTip, 'hover 时应渲染气泡')
+  assert.equal(hoverTip.props.role, 'tooltip')
+  assert.match(hoverTip.props.className, /dsh-semantic-copilot-tip/)
+  assert.equal(hoverTip.props.children, '语义增强')
+
+  // 移出：气泡消失。
+  findButton(instance.tree).props.onMouseLeave()
+  await flush()
+  assert.equal(findTip(instance.tree), null)
+
+  // 键盘聚焦：同样展示气泡（纯键盘可访问性）。
+  findButton(instance.tree).props.onFocus()
+  await flush()
+  assert.ok(findTip(instance.tree), 'focus 时应渲染气泡')
+  findButton(instance.tree).props.onBlur()
+  await flush()
+  assert.equal(findTip(instance.tree), null)
+})
+
