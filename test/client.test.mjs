@@ -472,6 +472,21 @@ test('locale.bind 返回键名时回退内置表', () => {
   assert.equal(findButton(instance.tree).props['aria-label'], '语义增强')
 })
 
+test('props.t 回显键名时也不泄漏键名（回归 tipEnhance）', () => {
+  const mini = createMiniReact()
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(undefined)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  // 模拟宿主透传的 t：未知键原样回显（与真实 translate 的 `?? key` 一致）。
+  const echoT = (key) => key
+  const instance = mini.mount(Component, { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1', t: echoT })
+  const btn = findButton(instance.tree)
+  assert.equal(btn.props['data-tip'], '语义增强')
+  assert.equal(btn.props['aria-label'], '语义增强')
+})
+
 test('草稿被手动编辑后回到空闲文案（不再显示恢复原文）', async () => {
   const mini = createMiniReact()
   let resolveFetch
@@ -656,7 +671,7 @@ test('回归：插件重载时 locale 注册被释放后重注册成功', () => 
   assert.equal(registered.size, 2)
 })
 
-test('回归：props.t 优先于闭包 translator（语言切换实时生效）', () => {
+test('回归：忽略 props.t，始终以闭包 translator 为准（语言切换实时生效）', () => {
   const mini = createMiniReact()
   const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
   const { ctx, captured } = makeSlotsCtx(undefined)
@@ -668,15 +683,32 @@ test('回归：props.t 优先于闭包 translator（语言切换实时生效）'
     inputActions: { setDraft() {} },
     keyboard: null,
     sessionId: 's1',
-    // kit 在运行时切语言后传入的新 t：把 enhance 文案换成自定义值。
-    t: (key) => (key === 'enhance' ? 'Enhance (live)' : key),
+    // 宿主即便透传 t，也必须被忽略：否则未知键会以 `?? key` 原样回显成键名。
+    t: (key) => key,
   }
   const instance = mini.mount(Component, props)
-  assert.equal(findButton(instance.tree).props['aria-label'], 'Enhance (live)')
-  // 不传 props.t 时走闭包兜底。
-  delete props.t
-  mini.rerender(instance, { ...props })
   assert.equal(findButton(instance.tree).props['aria-label'], '语义增强')
+})
+
+test('回归：运行时切换语言，闭包 translator 立即生效', () => {
+  const mini = createMiniReact()
+  // 可变语言：bind 返回的函数每次调用都读取当前语言，模拟宿主 locale 的实时切换。
+  let lang = 'zh'
+  const locale = {
+    register() {},
+    bind: () => (key) => (lang === 'en' && key === 'enhance' ? 'Enhance' : key),
+  }
+  const { module } = loadClient(mini.React, () => { throw new Error('no fetch') })
+  const { ctx, captured } = makeSlotsCtx(locale)
+  module.apply(ctx)
+  const Component = captured.registered[0].Component
+  const state = { draft: 'A' }
+  const props = { useInput: (sel) => sel(state), inputActions: { setDraft() {} }, keyboard: null, sessionId: 's1' }
+  const instance = mini.mount(Component, props)
+  assert.equal(findButton(instance.tree).props['aria-label'], '语义增强')
+  lang = 'en'
+  mini.rerender(instance, { ...props })
+  assert.equal(findButton(instance.tree).props['aria-label'], 'Enhance')
 })
 
 test('回归：状态与图标映射（idle/busy/done/error）', async () => {

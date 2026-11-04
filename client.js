@@ -148,8 +148,10 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 生成按钮组件。slot meta 已声明 `locale: NS`：kit 会在运行时切换语言时传新的 `t`，
-     * 组件优先用 props.t；闭包 `t` 仅兜 kit 未提供的场景。
+     * 生成按钮组件。
+     * 文案统一走闭包 `t`（translator 产出，末尾 ZH/EN 兜底，绝不返回键名）。
+     * 宿主向 slot 组件只传声明过的 props（本 slot 即 `{}`），不会传 `t`；
+     * 即便透传，宿主 translate 对未知键是 `?? key` 原样回显，会泄漏 `tipEnhance` 这类键名。
      */
     function makeEnhanceButton(t) {
       return function SemanticCopilotButton(props) {
@@ -158,7 +160,9 @@ window.__ModuleLoader__.load({
           useInput((state) => (state && typeof state.draft === 'string' ? state.draft : '')) || ''
         const inputActions = props.inputActions
         const sessionId = props.sessionId
-        const tr = typeof props.t === 'function' ? props.t : t
+        // 宿主 translate 对未知键是 `?? key` 原样回显，props.t 会把 tipEnhance 泄漏到气泡；
+        // 闭包 t 末尾有 ZH/EN 兜底，绝不返回键名，故统一只用闭包 t。
+        const tr = t
 
         const [phase, setPhase] = useState('idle')
         const [original, setOriginal] = useState('')
